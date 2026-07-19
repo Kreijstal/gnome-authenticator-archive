@@ -23,6 +23,26 @@ use crate::{
     widgets::{BackupDialog, KeyringErrorDialog, PreferencesWindow, ProvidersDialog, Window},
 };
 
+
+#[cfg(target_os = "macos")]
+async fn macos_file_keyring() -> oo7::Result<oo7::Keyring> {
+    let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+    let path = std::path::PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("authenticator")
+        .join("default.keyring");
+    let file = oo7::file::UnlockedKeyring::load(
+        path,
+        oo7::Secret::text("authenticator-macos-development-key"),
+    )
+    .await?;
+
+    Ok(oo7::Keyring::File(Arc::new(tokio::sync::RwLock::new(Some(
+        oo7::file::Keyring::Unlocked(file),
+    )))))
+}
+
 mod imp {
     use std::cell::{Cell, RefCell};
 
@@ -196,6 +216,7 @@ mod imp {
                 move |_| app.restart_lock_timeout()
             ));
 
+            #[cfg(not(target_os = "macos"))]
             spawn(clone!(
                 #[strong]
                 app,
@@ -274,6 +295,13 @@ impl Application {
         std::fs::create_dir_all(&*FAVICONS_PATH).ok();
 
         // To be removed in the upcoming release
+        #[cfg(target_os = "macos")]
+        if !SETTINGS.keyrings_migrated() {
+            SETTINGS
+                .set_keyrings_migrated(true)
+                .expect("Failed to update settings");
+        }
+        #[cfg(not(target_os = "macos"))]
         if !SETTINGS.keyrings_migrated() {
             tracing::info!("Migrating the secrets to the file backend");
             let output: oo7::Result<()> = RUNTIME.block_on(async {
@@ -301,7 +329,12 @@ impl Application {
         }
 
         let is_keyring_open = spawn_tokio_blocking(async {
-            match oo7::Keyring::new().await {
+            #[cfg(target_os = "macos")]
+            let keyring_result = macos_file_keyring().await;
+            #[cfg(not(target_os = "macos"))]
+            let keyring_result = oo7::Keyring::new().await;
+
+            match keyring_result {
                 Ok(keyring) => {
                     if let Err(err) = keyring.unlock().await {
                         tracing::error!("Could not unlock keyring: {err}");
@@ -419,8 +452,7 @@ impl Application {
             }
             Ok(receiver) => receiver,
         };
-        loop {
-            let response = receiver.next().await.unwrap();
+        while let Some(response) = receiver.next().await {
             match response {
                 SearchProviderAction::LaunchSearch(terms) => {
                     self.activate();

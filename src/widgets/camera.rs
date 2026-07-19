@@ -37,6 +37,9 @@ pub mod screenshot {
     }
 
     pub async fn capture(window: Option<gtk::Window>) -> Result<gio::File> {
+        #[cfg(target_os = "macos")]
+        let identifier = None;
+        #[cfg(not(target_os = "macos"))]
         let identifier = if let Some(ref window) = window {
             ashpd::WindowIdentifier::from_native(window).await
         } else {
